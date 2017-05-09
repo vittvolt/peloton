@@ -1,6 +1,3 @@
-//===----------------------------------------------------------------------===//
-//
-//                         Peloton
 //
 // constraints_test.cpp
 //
@@ -17,6 +14,7 @@
 #include "gtest/gtest.h"
 
 #include "concurrency/testing_transaction_util.h"
+#include "executor/testing_executor_util.h"
 #include "common/harness.h"
 
 #include "catalog/schema.h"
@@ -43,17 +41,18 @@
 #include "planner/plan_util.h"
 #include "parser/postgresparser.h"
 
-#define NOTNULL_TEST
-#define MULTI_NOTNULL_TEST
-#define CHECK_TEST
-#define DEFAULT_TEST
+//#define NOTNULL_TEST
+//#define MULTI_NOTNULL_TEST
+//#define CHECK_TEST
+//#define DEFAULT_TEST
 // #define PRIMARY_UNIQUEKEY_TEST
-#define FOREIGN_KEY_TEST
+//#define FOREIGN_KEY_TEST
 //#define FOREIGN_MULTI_KEY_TEST
-#define UNIQUE_TEST
-#define MULTI_UNIQUE_TEST
+//#define UNIQUE_TEST
+//#define MULTI_UNIQUE_TEST
 
-#define DEFAULT_VALUE 11111
+//#define DEFAULT_VALUE 11111
+#define PERFROMANCE_TEST
 
 namespace peloton {
 namespace test {
@@ -63,6 +62,7 @@ namespace test {
 //===--------------------------------------------------------------------===//
 
 class ConstraintsTests : public PelotonTest {};
+std::atomic<int> loader_tuple_id;
 
 // FIXME: see the explanation rpc_client_test and rpc_server_test
 #ifdef NOTNULL_TEST
@@ -843,6 +843,156 @@ TEST_F(ConstraintsTests, ForeignKeyMultiInsertTest) {
   catalog::Catalog::GetInstance()->DropDatabaseWithName(db_name, txn);
   txn_manager.CommitTransaction(txn);
   delete foreign_key;
+}
+#endif
+
+#ifdef PERFROMANCE_TEST
+void InsertTuple1(storage::DataTable *table, type::AbstractPool *pool,
+                 oid_t tilegroup_count_per_loader,
+                 UNUSED_ATTRIBUTE uint64_t thread_itr) {
+  auto &txn_manager = concurrency::TransactionManagerFactory::GetInstance();
+
+  oid_t tuple_count = tilegroup_count_per_loader * TEST_TUPLES_PER_TILEGROUP;
+
+  // Start a txn for each insert
+  auto txn = txn_manager.BeginTransaction();
+  std::unique_ptr<storage::Tuple> tuple(
+      TestingExecutorUtil::GetTuple(table, ++loader_tuple_id, pool));
+
+  std::unique_ptr<executor::ExecutorContext> context(
+      new executor::ExecutorContext(txn));
+
+  planner::InsertPlan node(table, std::move(tuple));
+
+  // Insert the desired # of tuples
+  for (oid_t tuple_itr = 0; tuple_itr < tuple_count; tuple_itr++) {
+    executor::InsertExecutor executor(&node, context.get());
+    executor.Execute();
+  }
+
+  txn_manager.CommitTransaction(txn);
+}
+
+TEST_F(ConstraintsTests, performanceNoConstraintTest) {
+  // We are going to simply load tile groups concurrently in this test
+  // WARNING: This test may potentially run for a long time if
+  // TEST_TUPLES_PER_TILEGROUP is large, consider rewrite the test or hard
+  // code the number of tuples per tile group in this test
+  oid_t tuples_per_tilegroup = TEST_TUPLES_PER_TILEGROUP;
+
+  // Control the scale
+  oid_t loader_threads_count = 1;
+  oid_t tilegroup_count_per_loader = 0;
+
+  // Each tuple size ~40 B.
+  UNUSED_ATTRIBUTE oid_t tuple_size = 41;
+
+  std::unique_ptr<storage::DataTable> data_table(
+      TestingExecutorUtil::CreateTable(tuples_per_tilegroup, false));
+  auto testing_pool = TestingHarness::GetInstance().GetTestingPool();
+
+  Timer<> timer;
+
+  timer.Start();
+
+  LaunchParallelTest(loader_threads_count, InsertTuple1, data_table.get(),
+                     testing_pool, tilegroup_count_per_loader);
+
+  timer.Stop();
+  UNUSED_ATTRIBUTE auto duration = timer.GetDuration();
+
+  LOG_INFO("No constraint Duration: %.2lf", duration);
+
+  auto expected_tile_group_count = 0;
+
+  int total_tuple_count = loader_threads_count * tilegroup_count_per_loader * TEST_TUPLES_PER_TILEGROUP;
+  int max_cached_tuple_count = TEST_TUPLES_PER_TILEGROUP * storage::DataTable::default_active_tilegroup_count_;
+  int max_unfill_cached_tuple_count = (TEST_TUPLES_PER_TILEGROUP - 1) * storage::DataTable::default_active_tilegroup_count_;
+
+  if (total_tuple_count - max_cached_tuple_count <= 0) {
+    if (total_tuple_count <= max_unfill_cached_tuple_count) {
+      expected_tile_group_count = storage::DataTable::default_active_tilegroup_count_;
+    } else {
+      expected_tile_group_count = storage::DataTable::default_active_tilegroup_count_ + total_tuple_count - max_unfill_cached_tuple_count; 
+    }
+  } else {
+    int filled_tile_group_count = total_tuple_count / max_cached_tuple_count * storage::DataTable::default_active_tilegroup_count_;
+    
+    if (total_tuple_count - filled_tile_group_count * TEST_TUPLES_PER_TILEGROUP - max_unfill_cached_tuple_count <= 0) {
+      expected_tile_group_count = filled_tile_group_count + storage::DataTable::default_active_tilegroup_count_;
+    } else {
+      expected_tile_group_count = filled_tile_group_count + storage::DataTable::default_active_tilegroup_count_ + (total_tuple_count - filled_tile_group_count - max_unfill_cached_tuple_count); 
+    }
+  }
+
+  UNUSED_ATTRIBUTE auto bytes_to_megabytes_converter = (1024 * 1024);
+
+  EXPECT_EQ(data_table->GetTileGroupCount(), expected_tile_group_count);
+
+  LOG_INFO("Dataset size : %u MB \n",
+           (expected_tile_group_count * tuples_per_tilegroup * tuple_size) /
+               bytes_to_megabytes_converter);
+}
+
+TEST_F(ConstraintsTests, performanceConstraintTest) {
+  // We are going to simply load tile groups concurrently in this test
+  // WARNING: This test may potentially run for a long time if
+  // TEST_TUPLES_PER_TILEGROUP is large, consider rewrite the test or hard
+  // code the number of tuples per tile group in this test
+  oid_t tuples_per_tilegroup = TEST_TUPLES_PER_TILEGROUP;
+
+  // Control the scale
+  oid_t loader_threads_count = 1;
+  oid_t tilegroup_count_per_loader = 1000000;
+
+  // Each tuple size ~40 B.
+  UNUSED_ATTRIBUTE oid_t tuple_size = 41;
+
+  std::unique_ptr<storage::DataTable> data_table(
+      TestingExecutorUtil::CreateTable1(tuples_per_tilegroup));
+  auto testing_pool = TestingHarness::GetInstance().GetTestingPool();
+
+  Timer<> timer;
+
+  timer.Start();
+
+  LaunchParallelTest(loader_threads_count, InsertTuple1, data_table.get(),
+                     testing_pool, tilegroup_count_per_loader);
+
+  timer.Stop();
+  UNUSED_ATTRIBUTE auto duration = timer.GetDuration();
+
+  LOG_INFO("With Constraint Duration: %.2lf", duration);
+
+  auto expected_tile_group_count = 0;
+
+  int total_tuple_count = loader_threads_count * tilegroup_count_per_loader * TEST_TUPLES_PER_TILEGROUP;
+  int max_cached_tuple_count = TEST_TUPLES_PER_TILEGROUP * storage::DataTable::default_active_tilegroup_count_;
+  int max_unfill_cached_tuple_count = (TEST_TUPLES_PER_TILEGROUP - 1) * storage::DataTable::default_active_tilegroup_count_;
+
+  if (total_tuple_count - max_cached_tuple_count <= 0) {
+    if (total_tuple_count <= max_unfill_cached_tuple_count) {
+      expected_tile_group_count = storage::DataTable::default_active_tilegroup_count_;
+    } else {
+      expected_tile_group_count = storage::DataTable::default_active_tilegroup_count_ + total_tuple_count - max_unfill_cached_tuple_count; 
+    }
+  } else {
+    int filled_tile_group_count = total_tuple_count / max_cached_tuple_count * storage::DataTable::default_active_tilegroup_count_;
+    
+    if (total_tuple_count - filled_tile_group_count * TEST_TUPLES_PER_TILEGROUP - max_unfill_cached_tuple_count <= 0) {
+      expected_tile_group_count = filled_tile_group_count + storage::DataTable::default_active_tilegroup_count_;
+    } else {
+      expected_tile_group_count = filled_tile_group_count + storage::DataTable::default_active_tilegroup_count_ + (total_tuple_count - filled_tile_group_count - max_unfill_cached_tuple_count); 
+    }
+  }
+
+  UNUSED_ATTRIBUTE auto bytes_to_megabytes_converter = (1024 * 1024);
+
+  EXPECT_EQ(data_table->GetTileGroupCount(), expected_tile_group_count);
+
+  LOG_INFO("Dataset size : %u MB \n",
+           (expected_tile_group_count * tuples_per_tilegroup * tuple_size) /
+               bytes_to_megabytes_converter);
 }
 #endif
 

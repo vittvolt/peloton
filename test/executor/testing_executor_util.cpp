@@ -85,9 +85,6 @@ catalog::Column TestingExecutorUtil::GetColumnInfo(int index) {
       auto column = catalog::Column(
           type::Type::INTEGER, type::Type::GetTypeSize(type::Type::INTEGER),
           "COL_A", is_inlined);
-
-      column.AddConstraint(catalog::Constraint(ConstraintType::NOTNULL,
-                                               not_null_constraint_name));
       return column;
     } break;
 
@@ -95,9 +92,6 @@ catalog::Column TestingExecutorUtil::GetColumnInfo(int index) {
       auto column = catalog::Column(
           type::Type::INTEGER, type::Type::GetTypeSize(type::Type::INTEGER),
           "COL_B", is_inlined);
-
-      column.AddConstraint(catalog::Constraint(ConstraintType::NOTNULL,
-                                               not_null_constraint_name));
       return column;
     } break;
 
@@ -105,18 +99,12 @@ catalog::Column TestingExecutorUtil::GetColumnInfo(int index) {
       auto column = catalog::Column(
           type::Type::DECIMAL, type::Type::GetTypeSize(type::Type::DECIMAL),
           "COL_C", is_inlined);
-
-      column.AddConstraint(catalog::Constraint(ConstraintType::NOTNULL,
-                                               not_null_constraint_name));
       return column;
     } break;
 
     case 3: {
       auto column = catalog::Column(type::Type::VARCHAR, 25,  // Column length.
                                     "COL_D", !is_inlined);    // inlined.
-
-      column.AddConstraint(catalog::Constraint(ConstraintType::NOTNULL,
-                                               not_null_constraint_name));
       return column;
     } break;
 
@@ -124,16 +112,40 @@ catalog::Column TestingExecutorUtil::GetColumnInfo(int index) {
       auto column = catalog::Column(
           type::Type::INTEGER, type::Type::GetTypeSize(type::Type::INTEGER),
           "COL_E", is_inlined);
-      column.AddConstraint(catalog::Constraint(ConstraintType::DEFAULT,
-                                               not_null_constraint_name));
+      return column;
     } break;
 
-    case 115: {
+    case 5: {
       auto column = catalog::Column(
           type::Type::INTEGER, type::Type::GetTypeSize(type::Type::INTEGER),
-          "COL_CHECK", is_inlined);
-      column.AddConstraint(catalog::Constraint(
-          ConstraintType::CHECK, not_null_constraint_name, "CHECK COL_A > 0"));
+          "COL_F", is_inlined);
+      column.AddConstraint(catalog::Constraint(ConstraintType::NOTNULL,
+                                               not_null_constraint_name));
+      return column;
+
+    } break;
+
+
+    case 6: {
+      auto column = catalog::Column(
+          type::Type::INTEGER, type::Type::GetTypeSize(type::Type::INTEGER),
+          "COL_G", is_inlined);
+  	catalog::Constraint default_constraint(ConstraintType::DEFAULT, "default");
+  	default_constraint.addDefaultValue(type::ValueFactory::GetIntegerValue(5));
+  	column.AddConstraint(default_constraint);
+      return column;
+    } break;
+
+    case 7: {
+      auto column = catalog::Column(
+          type::Type::INTEGER, type::Type::GetTypeSize(type::Type::INTEGER),
+          "COL_H", is_inlined);
+
+     auto constraints = catalog::Constraint(ConstraintType::CHECK, "check1");
+     constraints.AddCheck(ExpressionType::COMPARE_GREATERTHAN, type::ValueFactory::GetIntegerValue(0));
+     column.AddConstraint(constraints);
+     return column;
+
     } break;
 
     default: {
@@ -420,6 +432,20 @@ storage::DataTable *TestingExecutorUtil::CreateTable(
     table->AddIndex(sec_index);
   }
 
+  return table;
+}
+
+storage::DataTable *TestingExecutorUtil::CreateTable1(
+    int tuples_per_tilegroup_count, oid_t table_oid) {
+  catalog::Schema *table_schema = new catalog::Schema(
+      {GetColumnInfo(7), GetColumnInfo(5), GetColumnInfo(6), GetColumnInfo(3)});
+  std::string table_name("test_table");
+  // Create table.
+  bool own_schema = true;
+  bool adapt_table = false;
+  storage::DataTable *table = storage::TableFactory::GetDataTable(
+      INVALID_OID, table_oid, table_schema, table_name,
+      tuples_per_tilegroup_count, own_schema, adapt_table);
   return table;
 }
 
